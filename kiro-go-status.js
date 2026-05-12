@@ -1,25 +1,36 @@
 /**
- * Kiro-Go 状态查询插件 v1.2.0
+ * Kiro-Go 状态查询插件 v1.3.0
  * 适用于 TRSS-Yunzai / Miao-Yunzai
- * 命令：#kiro状态 / #kiro查询
- * 以图片形式发送，包含主配额进度条
+ * 命令：#kiro状态 / #kiro状态1 / #kiro状态2 ...
+ * 支持多实例查询
  */
 
-// ============ 配置项 ============
-const KIRO_BASE_URL = 'http://127.0.0.1:8080'
-const KIRO_ADMIN_PASSWORD = 'your-admin-password-here'
+// ============ 配置项（按需添加更多实例） ============
+const KIRO_INSTANCES = [
+  {
+    name: 'Kiro-1',
+    url: 'http://127.0.0.1:8080',
+    password: 'your-password-1'
+  },
+  {
+    name: 'Kiro-2',
+    url: 'http://127.0.0.1:8081',
+    password: 'your-password-2'
+  }
+  // 可继续添加更多...
+]
 // ================================
 
 export class KiroGoStatus extends plugin {
   constructor() {
     super({
       name: 'Kiro-Go状态查询',
-      dsc: '查询 Kiro-Go 管理面板统计信息和账号列表',
+      dsc: '查询 Kiro-Go 管理面板统计信息和账号列表（多实例）',
       event: 'message',
       priority: 500,
       rule: [
         {
-          reg: /^#kiro(状态|查询)$/i,
+          reg: /^#kiro(状态|查询)(\d*)$/i,
           fnc: 'queryStatus'
         }
       ]
@@ -27,21 +38,34 @@ export class KiroGoStatus extends plugin {
   }
 
   async queryStatus(e) {
-    try {
-      const headers = { 'X-Admin-Password': KIRO_ADMIN_PASSWORD }
+    // 解析实例编号
+    const match = e.msg.match(/^#kiro(?:状态|查询)(\d*)$/i)
+    let idx = 0
+    if (match && match[1]) {
+      idx = parseInt(match[1]) - 1
+    }
 
-      // 并发请求统计和账号列表（用原来能跑的 fetch）
+    if (idx < 0 || idx >= KIRO_INSTANCES.length) {
+      await e.reply(`❌ 实例 #${idx + 1} 不存在，当前共 ${KIRO_INSTANCES.length} 个实例`)
+      return
+    }
+
+    const instance = KIRO_INSTANCES[idx]
+
+    try {
+      const headers = { 'X-Admin-Password': instance.password }
+
       const [statsRes, accountsRes] = await Promise.all([
-        fetch(`${KIRO_BASE_URL}/admin/api/stats`, { headers }),
-        fetch(`${KIRO_BASE_URL}/admin/api/accounts`, { headers })
+        fetch(`${instance.url}/admin/api/stats`, { headers }),
+        fetch(`${instance.url}/admin/api/accounts`, { headers })
       ])
 
       if (!statsRes.ok) {
-        await e.reply(`❌ 获取统计信息失败: HTTP ${statsRes.status}`)
+        await e.reply(`❌ [${instance.name}] 获取统计失败: HTTP ${statsRes.status}`)
         return
       }
       if (!accountsRes.ok) {
-        await e.reply(`❌ 获取账号列表失败: HTTP ${accountsRes.status}`)
+        await e.reply(`❌ [${instance.name}] 获取账号失败: HTTP ${accountsRes.status}`)
         return
       }
 
@@ -57,8 +81,8 @@ export class KiroGoStatus extends plugin {
       }
       const totalUsagePercent = totalUsageLimit > 0 ? (totalUsageCurrent / totalUsageLimit * 100) : 0
 
-      // 生成 HTML 并尝试图片渲染
-      const html = buildHtml(stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent)
+      // 尝试图片渲染
+      const html = buildHtml(instance.name, stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent)
 
       try {
         const puppeteer = (await import('../../lib/puppeteer/puppeteer.js')).default
@@ -75,21 +99,20 @@ export class KiroGoStatus extends plugin {
         await page.close()
         await e.reply(segment.image(img))
       } catch (renderErr) {
-        // 图片渲染失败，回退文本
-        await e.reply(buildText(stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent))
+        await e.reply(buildText(instance.name, stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent))
       }
     } catch (err) {
-      await e.reply(`❌ 查询失败: ${err.message}`)
+      await e.reply(`❌ [${instance.name}] 查询失败: ${err.message}`)
     }
   }
 }
 
 /** 文本回退 */
-function buildText(stats, accounts, usageCurrent, usageLimit, usagePercent) {
+function buildText(name, stats, accounts, usageCurrent, usageLimit, usagePercent) {
   const uptime = formatUptime(stats.uptime)
   const bar = makeTextBar(usagePercent)
 
-  let msg = `🚀 Kiro-Go 运行状态\n`
+  let msg = `🚀 ${name} 运行状态\n`
   msg += `━━━━━━━━━━━━━━━━━━\n`
   msg += `⏱️ 运行时间: ${uptime}\n`
   msg += `📊 总请求数: ${stats.totalRequests ?? 0}\n`
@@ -121,7 +144,7 @@ function makeTextBar(percent, len = 20) {
 }
 
 /** 图片 HTML */
-function buildHtml(stats, accounts, usageCurrent, usageLimit, usagePercent) {
+function buildHtml(name, stats, accounts, usageCurrent, usageLimit, usagePercent) {
   const uptime = formatUptime(stats.uptime)
   const progressColor = usagePercent > 80 ? '#ef4444' : usagePercent > 50 ? '#f59e0b' : '#10b981'
 
@@ -245,7 +268,7 @@ body {
 </head>
 <body>
 <div class="container">
-  <div class="title">🚀 Kiro-Go 运行状态</div>
+  <div class="title">🚀 ${name} 运行状态</div>
   <div class="stats-grid">
     <div class="stat-item"><div class="stat-value">${stats.totalRequests ?? 0}</div><div class="stat-label">📊 总请求</div></div>
     <div class="stat-item"><div class="stat-value" style="color:#10b981">${stats.successRequests ?? 0}</div><div class="stat-label">✅ 成功</div></div>
@@ -265,7 +288,7 @@ body {
   </div>
   <div class="section-title">👥 账号列表 (${accounts.length})</div>
   ${accountsHtml}
-  <div class="footer">Kiro-Go · 数据实时查询</div>
+  <div class="footer">${name} · 数据实时查询</div>
 </div>
 </body>
 </html>`
