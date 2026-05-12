@@ -80,9 +80,12 @@ export class KiroGoStatus extends plugin {
 /**
  * 使用 Node.js 原生 http/https 模块发请求（避免 fetch 兼容性问题）
  */
+import http from 'node:http'
+import https from 'node:https'
+
 function httpGet(url, headers = {}) {
   return new Promise((resolve, reject) => {
-    const mod = url.startsWith('https') ? require('https') : require('http')
+    const mod = url.startsWith('https') ? https : http
     const urlObj = new URL(url)
     const options = {
       hostname: urlObj.hostname,
