@@ -1,5 +1,5 @@
 /**
- * Kiro-Go 状态查询插件 v1.1.0
+ * Kiro-Go 状态查询插件 v1.1.1
  * 适用于 TRSS-Yunzai / Miao-Yunzai
  * 命令：#kiro状态 / #kiro查询
  * 以图片形式发送，包含主配额进度条
@@ -9,8 +9,6 @@
 const KIRO_BASE_URL = 'http://127.0.0.1:8080'
 const KIRO_ADMIN_PASSWORD = 'your-admin-password-here'
 // ================================
-
-import puppeteer from '../../lib/puppeteer/puppeteer.js'
 
 export class KiroGoStatus extends plugin {
   constructor() {
@@ -32,24 +30,13 @@ export class KiroGoStatus extends plugin {
     try {
       const headers = { 'X-Admin-Password': KIRO_ADMIN_PASSWORD }
 
-      const [statsRes, accountsRes] = await Promise.all([
-        fetch(`${KIRO_BASE_URL}/admin/api/stats`, { headers }),
-        fetch(`${KIRO_BASE_URL}/admin/api/accounts`, { headers })
+      // 使用 http/https 模块代替 fetch，兼容性更好
+      const [stats, accounts] = await Promise.all([
+        httpGet(`${KIRO_BASE_URL}/admin/api/stats`, headers),
+        httpGet(`${KIRO_BASE_URL}/admin/api/accounts`, headers)
       ])
 
-      if (!statsRes.ok) {
-        await e.reply(`❌ 获取统计信息失败: HTTP ${statsRes.status}`)
-        return
-      }
-      if (!accountsRes.ok) {
-        await e.reply(`❌ 获取账号列表失败: HTTP ${accountsRes.status}`)
-        return
-      }
-
-      const stats = await statsRes.json()
-      const accounts = await accountsRes.json()
-
-      // 计算主配额（所有账号的 usageCurrent 和 usageLimit 汇总）
+      // 计算主配额
       let totalUsageCurrent = 0
       let totalUsageLimit = 0
       for (const acc of accounts) {
@@ -61,25 +48,106 @@ export class KiroGoStatus extends plugin {
       // 生成 HTML
       const html = buildHtml(stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent)
 
-      // 使用 Puppeteer 截图
-      const browser = await puppeteer.browserInit()
-      const page = await browser.newPage()
-      await page.setViewport({ width: 500, height: 800 })
-      await page.setContent(html, { waitUntil: 'networkidle0' })
-
-      const body = await page.$('body')
-      const box = await body.boundingBox()
-      const img = await page.screenshot({
-        type: 'png',
-        clip: { x: 0, y: 0, width: box.width, height: box.height }
-      })
-      await page.close()
+      // 动态加载 puppeteer 渲染图片
+      let img
+      try {
+        const puppeteer = (await import('../../lib/puppeteer/puppeteer.js')).default
+        const browser = await puppeteer.browserInit()
+        const page = await browser.newPage()
+        await page.setViewport({ width: 500, height: 800 })
+        await page.setContent(html, { waitUntil: 'networkidle0' })
+        const body = await page.$('body')
+        const box = await body.boundingBox()
+        img = await page.screenshot({
+          type: 'png',
+          clip: { x: 0, y: 0, width: box.width, height: box.height }
+        })
+        await page.close()
+      } catch (renderErr) {
+        // 渲染失败则回退到文本模式
+        logger.warn(`[Kiro-Go] 图片渲染失败，回退文本: ${renderErr.message}`)
+        await e.reply(buildText(stats, accounts, totalUsageCurrent, totalUsageLimit, totalUsagePercent))
+        return
+      }
 
       await e.reply(segment.image(img))
     } catch (err) {
       await e.reply(`❌ 查询失败: ${err.message}`)
     }
   }
+}
+
+/**
+ * 使用 Node.js 原生 http/https 模块发请求（避免 fetch 兼容性问题）
+ */
+function httpGet(url, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const mod = url.startsWith('https') ? require('https') : require('http')
+    const urlObj = new URL(url)
+    const options = {
+      hostname: urlObj.hostname,
+      port: urlObj.port,
+      path: urlObj.pathname + urlObj.search,
+      method: 'GET',
+      headers,
+      rejectUnauthorized: false,
+      timeout: 15000
+    }
+    const req = mod.request(options, (res) => {
+      let data = ''
+      res.on('data', chunk => { data += chunk })
+      res.on('end', () => {
+        if (res.statusCode >= 200 && res.statusCode < 300) {
+          try { resolve(JSON.parse(data)) }
+          catch (e) { reject(new Error(`JSON解析失败: ${data.slice(0, 100)}`)) }
+        } else {
+          reject(new Error(`HTTP ${res.statusCode}: ${data.slice(0, 100)}`))
+        }
+      })
+    })
+    req.on('error', reject)
+    req.on('timeout', () => { req.destroy(); reject(new Error('请求超时')) })
+    req.end()
+  })
+}
+
+/**
+ * 文本回退模式
+ */
+function buildText(stats, accounts, usageCurrent, usageLimit, usagePercent) {
+  const uptime = formatUptime(stats.uptime)
+  const bar = makeTextBar(usagePercent)
+
+  let msg = `🚀 Kiro-Go 运行状态\n`
+  msg += `━━━━━━━━━━━━━━━━━━\n`
+  msg += `⏱️ 运行时间: ${uptime}\n`
+  msg += `📊 总请求数: ${stats.totalRequests ?? 0}\n`
+  msg += `✅ 成功请求: ${stats.successRequests ?? 0}\n`
+  msg += `❌ 失败请求: ${stats.failedRequests ?? 0}\n`
+  msg += `🔤 总Tokens: ${formatNumber(stats.totalTokens ?? 0)}\n`
+  msg += `💰 总Credits: ${formatNumber(stats.totalCredits ?? 0)}\n`
+  msg += `━━━━━━━━━━━━━━━━━━\n`
+  msg += `📦 主配额: ${usageCurrent}/${usageLimit} (${usagePercent.toFixed(1)}%)\n`
+  msg += `${bar}\n`
+  msg += `━━━━━━━━━━━━━━━━━━\n`
+  msg += `👥 账号列表 (${accounts.length}):\n`
+
+  for (const acc of accounts) {
+    const email = maskEmail(acc.email)
+    const status = acc.enabled ? '🟢' : '🔴'
+    const sub = acc.subscriptionTitle || acc.subscriptionType || '未知'
+    const pct = acc.usagePercent != null ? (acc.usagePercent * 100).toFixed(1) : '0'
+    msg += `\n${status} ${email} [${sub}]\n`
+    msg += `   📈 用量: ${pct}% (${acc.usageCurrent ?? 0}/${acc.usageLimit ?? 0})\n`
+    msg += `   🔢 请求: ${acc.requestCount ?? 0} | 🔤 ${formatNumber(acc.totalTokens ?? 0)}\n`
+  }
+
+  return msg.trim()
+}
+
+function makeTextBar(percent, len = 20) {
+  const filled = Math.round(percent / 100 * len)
+  return '▓'.repeat(filled) + '░'.repeat(len - filled)
 }
 
 function buildHtml(stats, accounts, usageCurrent, usageLimit, usagePercent) {
@@ -91,7 +159,6 @@ function buildHtml(stats, accounts, usageCurrent, usageLimit, usagePercent) {
     const email = maskEmail(acc.email)
     const status = acc.enabled ? '🟢' : '🔴'
     const sub = acc.subscriptionTitle || acc.subscriptionType || '未知'
-    // 修复：usagePercent 是 0-1 的小数，需要 ×100 显示
     const pct = acc.usagePercent != null ? (acc.usagePercent * 100).toFixed(1) : '0'
     const accColor = pct > 80 ? '#ef4444' : pct > 50 ? '#f59e0b' : '#10b981'
 
@@ -190,7 +257,6 @@ body {
   height: 100%;
   border-radius: 8px;
   transition: width 0.3s;
-  position: relative;
 }
 .progress-text {
   position: absolute;
@@ -308,7 +374,7 @@ body {
   <div class="section-title">👥 账号列表 (${accounts.length})</div>
   ${accountsHtml}
 
-  <div class="footer">Kiro-Go v1.0.6 · 数据实时查询</div>
+  <div class="footer">Kiro-Go · 数据实时查询</div>
 </div>
 </body>
 </html>`
